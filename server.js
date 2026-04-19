@@ -24,7 +24,13 @@ async function getBrowser() {
   if (!browser) {
     browser = await puppeteer.launch({
       headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser" || "/usr/bin/chromium",
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 
+        (() => {
+          const fs = require("fs");
+          const paths = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"];
+          for (const p of paths) { try { fs.accessSync(p); return p; } catch(e) {} }
+          return "/usr/bin/chromium";
+        })(),
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
