@@ -7,7 +7,6 @@ app.use(cors());
 
 const PORT = process.env.PORT || 3000;
 
-// Map Swimrankings event names to our event names
 const EVENT_MAP = {
   "50 FR":   "50m Free",   "100 FR":  "100m Free",  "200 FR":  "200m Free",
   "400 FR":  "400m Free",  "800 FR":  "800m Free",  "1500 FR": "1500m Free",
@@ -17,7 +16,9 @@ const EVENT_MAP = {
   "200 IM":  "200m IM",    "400 IM":  "400m IM"
 };
 
-// Launch a shared browser instance
+// Ireland's numeric nation ID on Swimrankings
+const IRELAND_NATION_ID = "IRL";
+
 let browser = null;
 async function getBrowser() {
   if (!browser) {
@@ -38,62 +39,71 @@ async function getBrowser() {
   return browser;
 }
 
-// Fetch a page using a real browser
 async function fetchPage(url) {
   const b = await getBrowser();
   const page = await b.newPage();
   try {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
     await page.setExtraHTTPHeaders({ "Accept-Language": "en-GB,en;q=0.9" });
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-    // Accept cookie banner if present
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 25000 });
+    // Try to dismiss cookie banner
     try {
-      await page.click(".cookie-accept, #accept-cookies, .btn-accept", { timeout: 2000 });
+      const btn = await page.$(".btn-accept, #accept, .cookie-accept, button[id*='accept'], button[class*='accept']");
+      if (btn) await btn.click();
+      await page.waitForTimeout(500);
     } catch(e) {}
-    const html = await page.content();
-    return html;
+    return await page.content();
   } finally {
     await page.close();
   }
 }
 
-// Search for swimmer by name (Ireland only)
 async function searchSwimmer(name) {
-  const encoded = encodeURIComponent(name);
-  const url = `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=IRL&selectPage=SEARCH&lastName=${encoded}`;
-  const html = await fetchPage(url);
+  // Try with nation filter first, then without if no results
+  const urls = [
+    `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=${IRELAND_NATION_ID}&selectPage=SEARCH&lastName=${encodeURIComponent(name)}`,
+    `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=0&selectPage=SEARCH&lastName=${encodeURIComponent(name)}`
+  ];
 
-  const results = [];
-  const rowRegex = /athleteId=(\d+)[^>]*>([^<]+)<\/a>[\s\S]*?class="club"[^>]*>([^<]*)[\s\S]*?class="birthDate"[^>]*>(\d{4})/gi;
-  let m;
-  while ((m = rowRegex.exec(html)) !== null) {
-    results.push({
-      id:   m[1].trim(),
-      name: m[2].trim(),
-      club: m[3].trim(),
-      born: m[4].trim()
-    });
-  }
+  for (const url of urls) {
+    const html = await fetchPage(url);
 
-  // Fallback if main pattern misses
-  if (results.length === 0) {
-    const fallback = /athleteId=(\d+)[^>]*>\s*([A-Z][^<]{2,40})<\/a>/gi;
-    while ((m = fallback.exec(html)) !== null) {
-      const n = m[2].trim();
-      if (n.length > 3) results.push({ id: m[1], name: n, club: "", born: "" });
+    // Log a snippet to help debug
+    console.log("Search HTML snippet:", html.substring(0, 500));
+
+    const results = [];
+
+    // Primary pattern
+    const rowRegex = /athleteId=(\d+)[^>]*>([^<]+)<\/a>[\s\S]{0,200}?class="club"[^>]*>([^<]*)[\s\S]{0,200}?class="birthDate"[^>]*>(\d{4})/gi;
+    let m;
+    while ((m = rowRegex.exec(html)) !== null) {
+      results.push({ id: m[1].trim(), name: m[2].trim(), club: m[3].trim(), born: m[4].trim() });
     }
+
+    // Fallback pattern — just grab any athleteId links
+    if (results.length === 0) {
+      const fallback = /athleteId=(\d+)[^>]*>\s*([A-Za-z][^<]{2,50})<\/a>/gi;
+      while ((m = fallback.exec(html)) !== null) {
+        const n = m[2].trim();
+        if (n.length > 2 && !/^\d/.test(n)) {
+          results.push({ id: m[1], name: n, club: "", born: "" });
+        }
+      }
+    }
+
+    const seen = {};
+    const unique = results.filter(r => {
+      if (seen[r.id]) return false;
+      seen[r.id] = true;
+      return true;
+    }).slice(0, 8);
+
+    if (unique.length > 0) return unique;
   }
 
-  // Deduplicate
-  const seen = {};
-  return results.filter(r => {
-    if (seen[r.id]) return false;
-    seen[r.id] = true;
-    return true;
-  }).slice(0, 8);
+  return [];
 }
 
-// Fetch personal best LCM times for a swimmer
 async function fetchAthleteTimes(athleteId) {
   const url = `https://www.swimrankings.net/index.php?page=athleteDetail&athleteId=${athleteId}&pbest=0`;
   const html = await fetchPage(url);
@@ -103,6 +113,9 @@ async function fetchAthleteTimes(athleteId) {
 
   const nameMatch = html.match(/class="athleteName"[^>]*>([^<]+)/i);
   if (nameMatch) swimmerName = nameMatch[1].trim();
+
+  // Log snippet for debugging
+  console.log("Times HTML snippet:", html.substring(0, 500));
 
   const rowRegex = /class="athleteBest[01][^"]*"([\s\S]*?)(?=class="athleteBest[01]|<\/table>)/gi;
   let m;
@@ -120,13 +133,10 @@ async function fetchAthleteTimes(athleteId) {
   return { times, name: swimmerName };
 }
 
-// ── Routes ──
-
 app.get("/", (req, res) => {
-  res.json({ status: "Swim Times Server running" });
+  res.json({ status: "Swim Times Server running OK" });
 });
 
-// Search by name: /search?name=Murphy
 app.get("/search", async (req, res) => {
   const name = (req.query.name || "").trim();
   if (!name) return res.status(400).json({ error: "Please provide a name" });
@@ -147,7 +157,6 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// Fetch times by ID: /times?athleteId=1234567
 app.get("/times", async (req, res) => {
   const athleteId = (req.query.athleteId || "").trim();
   if (!athleteId) return res.status(400).json({ error: "Please provide an athleteId" });
@@ -158,6 +167,19 @@ app.get("/times", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch times: " + err.message });
+  }
+});
+
+// Debug endpoint — returns raw HTML of search so we can see what Swimrankings returns
+app.get("/debug", async (req, res) => {
+  const name = (req.query.name || "Murphy").trim();
+  const url = `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=IRL&selectPage=SEARCH&lastName=${encodeURIComponent(name)}`;
+  try {
+    const html = await fetchPage(url);
+    res.set("Content-Type", "text/html");
+    res.send(html);
+  } catch(err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
