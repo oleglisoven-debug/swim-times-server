@@ -4,12 +4,11 @@
   "description": "Fetches swimmer times from Swimrankings using Puppeteer",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "build": "apt-get install -y chromium || true"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer": "^21.0.0",
+    "puppeteer-core": "^21.0.0",
     "cors": "^2.8.5"
   },
   "engines": {
