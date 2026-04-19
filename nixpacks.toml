@@ -1,6 +1,6 @@
 [phases.setup]
-nixPkgs = ["chromium", "nss", "freetype", "harfbuzz", "ca-certificates", "ttf-dejavu"]
+aptPkgs = ["chromium", "chromium-driver", "fonts-liberation", "libappindicator3-1", "libasound2", "libatk-bridge2.0-0", "libgtk-3-0", "libx11-xcb1", "libxcomposite1", "libxdamage1", "libxrandr2", "xdg-utils"]
 
 [variables]
 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
-PUPPETEER_EXECUTABLE_PATH = "/run/current-system/sw/bin/chromium"
+PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
