@@ -1,6 +1,7 @@
 const express = require("express");
 const https = require("https");
 const cors = require("cors");
+const zlib = require("zlib");
 
 const app = express();
 app.use(cors());
@@ -79,7 +80,26 @@ function fetchURL(url) {
       const chunks = [];
       res.on("data", function(c) { chunks.push(c); });
       res.on("end", function() {
-        resolve(Buffer.concat(chunks).toString("latin1"));
+        const buf = Buffer.concat(chunks);
+        const encoding = res.headers["content-encoding"];
+        if (encoding === "gzip") {
+          zlib.gunzip(buf, function(err, decoded) {
+            if (err) resolve(buf.toString("latin1"));
+            else resolve(decoded.toString("latin1"));
+          });
+        } else if (encoding === "deflate") {
+          zlib.inflate(buf, function(err, decoded) {
+            if (err) resolve(buf.toString("latin1"));
+            else resolve(decoded.toString("latin1"));
+          });
+        } else if (encoding === "br") {
+          zlib.brotliDecompress(buf, function(err, decoded) {
+            if (err) resolve(buf.toString("latin1"));
+            else resolve(decoded.toString("latin1"));
+          });
+        } else {
+          resolve(buf.toString("latin1"));
+        }
       });
     });
 
