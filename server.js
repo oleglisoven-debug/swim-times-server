@@ -1,7 +1,6 @@
 const express = require("express");
-const https = require("https");
+const puppeteer = require("puppeteer");
 const cors = require("cors");
-const zlib = require("zlib");
 
 const app = express();
 app.use(cors());
@@ -17,164 +16,96 @@ const EVENT_MAP = {
   "200 IM":  "200m IM",    "400 IM":  "400m IM"
 };
 
-// Realistic browser headers that rotate to avoid detection
-const HEADERS = [
-  {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-IE,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0"
-  },
-  {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1"
+let browser = null;
+
+async function getBrowser() {
+  if (!browser || !browser.isConnected()) {
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        "--disable-sync",
+        "--disable-translate",
+        "--hide-scrollbars",
+        "--mute-audio",
+        "--shm-size=1gb"
+      ]
+    });
   }
-];
-
-let cookieJar = "";
-let requestCount = 0;
-
-function getHeaders() {
-  const h = HEADERS[requestCount % HEADERS.length];
-  requestCount++;
-  if (cookieJar) h["Cookie"] = cookieJar;
-  return h;
+  return browser;
 }
 
-function fetchURL(url) {
-  return new Promise(function(resolve, reject) {
-    const options = {
-      headers: getHeaders(),
-      timeout: 15000
-    };
-
-    const req = https.get(url, options, function(res) {
-      // Store cookies for session continuity
-      if (res.headers["set-cookie"]) {
-        const newCookies = res.headers["set-cookie"]
-          .map(c => c.split(";")[0])
-          .join("; ");
-        cookieJar = cookieJar ? cookieJar + "; " + newCookies : newCookies;
-      }
-
-      // Follow redirects
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        let redirect = res.headers.location;
-        if (!redirect.startsWith("http")) {
-          redirect = "https://www.swimrankings.net" + redirect;
-        }
-        return fetchURL(redirect).then(resolve).catch(reject);
-      }
-
-      const chunks = [];
-      res.on("data", function(c) { chunks.push(c); });
-      res.on("end", function() {
-        const buf = Buffer.concat(chunks);
-        const encoding = res.headers["content-encoding"];
-        if (encoding === "gzip") {
-          zlib.gunzip(buf, function(err, decoded) {
-            if (err) resolve(buf.toString("latin1"));
-            else resolve(decoded.toString("latin1"));
-          });
-        } else if (encoding === "deflate") {
-          zlib.inflate(buf, function(err, decoded) {
-            if (err) resolve(buf.toString("latin1"));
-            else resolve(decoded.toString("latin1"));
-          });
-        } else if (encoding === "br") {
-          zlib.brotliDecompress(buf, function(err, decoded) {
-            if (err) resolve(buf.toString("latin1"));
-            else resolve(decoded.toString("latin1"));
-          });
-        } else {
-          resolve(buf.toString("latin1"));
-        }
-      });
-    });
-
-    req.on("error", reject);
-    req.on("timeout", function() {
-      req.destroy();
-      reject(new Error("Request timed out"));
-    });
-  });
-}
-
-// Warm up session by visiting homepage first
-async function warmUpSession() {
+async function fetchPage(url) {
+  const b = await getBrowser();
+  const page = await b.newPage();
   try {
-    await fetchURL("https://www.swimrankings.net/index.php");
-    // Small delay to look human
-    await new Promise(r => setTimeout(r, 800));
-  } catch(e) {
-    console.log("Warmup failed:", e.message);
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
+    await page.setExtraHTTPHeaders({ "Accept-Language": "en-IE,en;q=0.9" });
+
+    // Visit homepage first to get cookies and pass Cloudflare
+    await page.goto("https://www.swimrankings.net/index.php", {
+      waitUntil: "networkidle2",
+      timeout: 30000
+    });
+
+    // Small human-like delay
+    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+
+    // Now go to the actual target page
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+
+    // Try to dismiss any cookie banners
+    try {
+      const btn = await page.$("button[id*='accept'], button[class*='accept'], .cookie-accept");
+      if (btn) { await btn.click(); await new Promise(r => setTimeout(r, 500)); }
+    } catch(e) {}
+
+    return await page.content();
+  } finally {
+    await page.close();
   }
 }
 
 async function searchSwimmer(name) {
-  // Warm up session first
-  await warmUpSession();
-
   const encoded = encodeURIComponent(name);
-  const urls = [
-    `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=IRL&selectPage=SEARCH&lastName=${encoded}`,
-    `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=0&selectPage=SEARCH&lastName=${encoded}`
-  ];
+  const url = `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=IRL&selectPage=SEARCH&lastName=${encoded}`;
+  const html = await fetchPage(url);
 
-  for (const url of urls) {
-    await new Promise(r => setTimeout(r, 500));
-    const html = await fetchURL(url);
-
-    console.log("Search response length:", html.length);
-    console.log("Search snippet:", html.substring(0, 300));
-
-    const results = [];
-
-    // Primary pattern matching Swimrankings HTML structure
-    const rowRegex = /class="athleteSearch[01][^"]*"[\s\S]*?athleteId=(\d+)[^>]*>([^<]+)<\/a>[\s\S]*?class="club"[^>]*>([^<]*)[\s\S]*?class="birthDate"[^>]*>(\d{4})/gi;
-    let m;
-    while ((m = rowRegex.exec(html)) !== null) {
-      results.push({ id: m[1].trim(), name: m[2].trim(), club: m[3].trim(), born: m[4].trim() });
-    }
-
-    // Fallback
-    if (results.length === 0) {
-      const fallback = /athleteId=(\d+)[^>]*>\s*([A-Z][^<]{2,50})<\/a>/gi;
-      while ((m = fallback.exec(html)) !== null) {
-        const n = m[2].trim();
-        if (n.length > 2 && !/\d/.test(n.charAt(0))) {
-          results.push({ id: m[1], name: n, club: "", born: "" });
-        }
-      }
-    }
-
-    const seen = {};
-    const unique = results.filter(r => {
-      if (seen[r.id]) return false;
-      seen[r.id] = true;
-      return true;
-    }).slice(0, 8);
-
-    if (unique.length > 0) return unique;
+  const results = [];
+  const rowRegex = /athleteId=(\d+)[^>]*>([^<]+)<\/a>[\s\S]{0,300}?class="club"[^>]*>([^<]*)[\s\S]{0,300}?class="birthDate"[^>]*>(\d{4})/gi;
+  let m;
+  while ((m = rowRegex.exec(html)) !== null) {
+    results.push({ id: m[1].trim(), name: m[2].trim(), club: m[3].trim(), born: m[4].trim() });
   }
-  return [];
+
+  if (results.length === 0) {
+    const fallback = /athleteId=(\d+)[^>]*>\s*([A-Z][^<]{2,50})<\/a>/gi;
+    while ((m = fallback.exec(html)) !== null) {
+      const n = m[2].trim();
+      if (n.length > 2) results.push({ id: m[1], name: n, club: "", born: "" });
+    }
+  }
+
+  const seen = {};
+  return results.filter(r => {
+    if (seen[r.id]) return false;
+    seen[r.id] = true;
+    return true;
+  }).slice(0, 8);
 }
 
 async function fetchAthleteTimes(athleteId) {
-  await new Promise(r => setTimeout(r, 500));
   const url = `https://www.swimrankings.net/index.php?page=athleteDetail&athleteId=${athleteId}&pbest=0`;
-  const html = await fetchURL(url);
+  const html = await fetchPage(url);
 
   const times = {};
   let swimmerName = "";
@@ -204,10 +135,9 @@ app.get("/", (req, res) => {
 
 app.get("/debug", async (req, res) => {
   const name = (req.query.name || "Murphy").trim();
-  await warmUpSession();
   const url = `https://www.swimrankings.net/index.php?page=athleteSelect&nationId=IRL&selectPage=SEARCH&lastName=${encodeURIComponent(name)}`;
   try {
-    const html = await fetchURL(url);
+    const html = await fetchPage(url);
     res.set("Content-Type", "text/html");
     res.send(html);
   } catch(err) {
