@@ -63,6 +63,22 @@ async function fetchPage(url) {
     // Now go to the actual target page
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
 
+    // Wait for Cloudflare challenge to resolve if present
+    let attempts = 0;
+    while (attempts < 10) {
+      const content = await page.content();
+      if (content.includes("athleteSelect") || content.includes("athleteDetail") || 
+          content.includes("athleteSearch") || content.includes("swimrankings")) {
+        break;
+      }
+      if (content.includes("security verification") || content.includes("cf_chl")) {
+        await new Promise(r => setTimeout(r, 3000));
+        attempts++;
+      } else {
+        break;
+      }
+    }
+
     // Try to dismiss any cookie banners
     try {
       const btn = await page.$("button[id*='accept'], button[class*='accept'], .cookie-accept");
