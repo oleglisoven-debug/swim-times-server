@@ -1,12 +1,7 @@
-FROM ghcr.io/puppeteer/puppeteer:21.0.0
-
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable \
-    NODE_OPTIONS="--max-old-space-size=256"
-
+FROM node:18-alpine
 WORKDIR /app
 COPY package.json ./
-RUN npm install --no-cache
+RUN npm install
 COPY server.js ./
 EXPOSE 3000
 CMD ["node", "server.js"]
