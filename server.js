@@ -1,10 +1,11 @@
 const express = require("express");
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+puppeteer.use(StealthPlugin());
 const cors = require("cors");
 
 const app = express();
 app.use(cors());
-
 const PORT = process.env.PORT || 3000;
 
 const EVENT_MAP = {
@@ -30,13 +31,7 @@ async function getBrowser() {
         "--no-first-run",
         "--no-zygote",
         "--disable-gpu",
-        "--disable-extensions",
-        "--disable-background-networking",
-        "--disable-default-apps",
-        "--disable-sync",
-        "--disable-translate",
-        "--hide-scrollbars",
-        "--mute-audio",
+        "--window-size=1920,1080",
         "--shm-size=1gb"
       ]
     });
@@ -48,42 +43,38 @@ async function fetchPage(url) {
   const b = await getBrowser();
   const page = await b.newPage();
   try {
+    // Set realistic viewport and user agent
+    await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
-    await page.setExtraHTTPHeaders({ "Accept-Language": "en-IE,en;q=0.9" });
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-IE,en-GB;q=0.9,en;q=0.8",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    });
 
-    // Visit homepage first to get cookies and pass Cloudflare
+    // Visit homepage first to establish session and pass Cloudflare
     await page.goto("https://www.swimrankings.net/index.php", {
       waitUntil: "networkidle2",
       timeout: 30000
     });
 
-    // Small human-like delay
-    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+    // Human-like delay
+    await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
 
-    // Now go to the actual target page
+    // Accept cookies if banner appears
+    try {
+      await page.click("#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll", { timeout: 3000 });
+      await new Promise(r => setTimeout(r, 500));
+    } catch(e) {}
+
+    // Now navigate to the actual page
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
 
-    // Wait for Cloudflare challenge to resolve if present
-    let attempts = 0;
-    while (attempts < 10) {
+    // Wait for Cloudflare to clear if needed
+    for (let i = 0; i < 8; i++) {
       const content = await page.content();
-      if (content.includes("athleteSelect") || content.includes("athleteDetail") || 
-          content.includes("athleteSearch") || content.includes("swimrankings")) {
-        break;
-      }
-      if (content.includes("security verification") || content.includes("cf_chl")) {
-        await new Promise(r => setTimeout(r, 3000));
-        attempts++;
-      } else {
-        break;
-      }
+      if (!content.includes("security verification") && !content.includes("cf-browser-verification")) break;
+      await new Promise(r => setTimeout(r, 3000));
     }
-
-    // Try to dismiss any cookie banners
-    try {
-      const btn = await page.$("button[id*='accept'], button[class*='accept'], .cookie-accept");
-      if (btn) { await btn.click(); await new Promise(r => setTimeout(r, 500)); }
-    } catch(e) {}
 
     return await page.content();
   } finally {
@@ -145,9 +136,7 @@ async function fetchAthleteTimes(athleteId) {
   return { times, name: swimmerName };
 }
 
-app.get("/", (req, res) => {
-  res.json({ status: "Swim Times Server running OK" });
-});
+app.get("/", (req, res) => res.json({ status: "Swim Times Server running OK" }));
 
 app.get("/debug", async (req, res) => {
   const name = (req.query.name || "Murphy").trim();
@@ -166,16 +155,13 @@ app.get("/search", async (req, res) => {
   if (!name) return res.status(400).json({ error: "Please provide a name" });
   try {
     const results = await searchSwimmer(name);
-    if (results.length === 0) {
-      return res.json({ results: [], message: "No swimmers found. Try surname only." });
-    }
+    if (results.length === 0) return res.json({ results: [], message: "No swimmers found. Try surname only." });
     if (results.length === 1) {
-      const { times, name: swimmerName } = await fetchAthleteTimes(results[0].id);
+      const { times } = await fetchAthleteTimes(results[0].id);
       return res.json({ swimmer: results[0], times });
     }
     res.json({ results });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Search failed: " + err.message });
   }
 });
@@ -187,11 +173,8 @@ app.get("/times", async (req, res) => {
     const { times, name } = await fetchAthleteTimes(athleteId);
     res.json({ times, name });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Failed: " + err.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Swim Times Server listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Swim Times Server listening on port ${PORT}`));
